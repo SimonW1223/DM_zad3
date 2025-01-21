@@ -1,0 +1,158 @@
+pip install datasets
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from datasets import load_dataset
+import matplotlib.pyplot as plt
+
+data = load_dataset("ucirvine/reuters21578", "ModHayes", split="train")
+texts = [item["text"] for item in data]
+labels = [item["topics"][0] if item["topics"] else "unknown" for item in data]
+
+label_encoder = LabelEncoder()
+encoded_labels = label_encoder.fit_transform(labels)
+num_classes = len(label_encoder.classes_)
+
+max_vocab_size = 10000
+max_sequence_length = 200
+
+tokenizer = Tokenizer(num_words=max_vocab_size, oov_token="<OOV>")
+tokenizer.fit_on_texts(texts)
+sequences = tokenizer.texts_to_sequences(texts)
+padded_sequences = pad_sequences(sequences, maxlen=max_sequence_length, padding="post")
+
+X_train, X_val, y_train, y_val = train_test_split(
+    padded_sequences, encoded_labels, test_size=0.2, random_state=42
+)
+
+class TextDataset(Dataset):
+    def __init__(self, texts, labels):
+        self.texts = torch.tensor(texts, dtype=torch.long)
+        self.labels = torch.tensor(labels, dtype=torch.long)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.texts[idx], self.labels[idx]
+
+
+train_dataset = TextDataset(X_train, y_train)
+val_dataset = TextDataset(X_val, y_val)
+
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32)
+
+class TextClassifier(nn.Module):
+    def __init__(self, vocab_size, embed_size, num_classes):
+        super(TextClassifier, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.fc1 = nn.Linear(embed_size * max_sequence_length, 128)
+        self.dropout = nn.Dropout(0.3)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.embedding(x)
+        x = x.view(x.size(0), -1)
+        x = torch.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+
+model = TextClassifier(vocab_size=max_vocab_size, embed_size=64, num_classes=num_classes)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+
+train_accuracies = []
+val_accuracies = []
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, epochs=10):
+    model.train()
+    for epoch in range(epochs):
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        for texts, labels in train_loader:
+            optimizer.zero_grad()
+            outputs = model(texts)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+        train_accuracy = 100 * correct / total
+        train_accuracies.append(train_accuracy)
+
+        val_accuracy = evaluate_model(model, val_loader)
+        val_accuracies.append(val_accuracy)
+
+        print(f"Epoch {epoch + 1}/{epochs}, Loss: {running_loss / len(train_loader):.4f}, Train Accuracy: {train_accuracy:.2f}%")
+
+
+def evaluate_model(model, val_loader):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for texts, labels in val_loader:
+            outputs = model(texts)
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    return 100 * correct / total
+
+
+train_model(model, train_loader, val_loader, criterion, optimizer, epochs=10)
+
+plt.plot(train_accuracies, label="Train Accuracy")
+plt.xlabel("Epoki")
+plt.ylabel("Dokładność (%)")
+plt.title("Dokładność modelu")
+plt.legend()
+plt.show()
+
+import numpy as np
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+all_preds = []
+all_labels = []
+
+for texts, labels in val_loader:
+    outputs = model(texts)
+    _, predicted = torch.max(outputs, 1)
+    all_preds.extend(predicted.cpu().numpy()) 
+    all_labels.extend(labels.cpu().numpy())
+
+cm = confusion_matrix(all_labels, all_preds)
+labels = label_encoder.classes_
+
+class_counts = np.sum(cm, axis=1)
+
+
+num_classes = 10 
+top_classes = np.argsort(class_counts)[::-1][:num_classes]
+cm_filtered = cm[top_classes][:, top_classes]
+filtered_labels = labels[top_classes]
+
+
+plt.figure(figsize=(12, 10))
+sns.heatmap(cm_filtered, annot=True, fmt="d", cmap="Blues", xticklabels=filtered_labels, yticklabels=filtered_labels)
+plt.xlabel("Predicted Labels")
+plt.ylabel("True Labels")
+plt.title(f"Macierz pomyłek najczęstszych klas")
+plt.show()
